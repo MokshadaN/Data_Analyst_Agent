@@ -1178,8 +1178,6 @@ async def upload_files(request: Request):
         # make the values themselves safe for later usage
         data_files = _to_safe(data_files, mode="replace")
         questions  = _to_safe(questions,  mode="replace")
-
-        raise Exception("Forced exception for testing")
         # optional: debug print
         _safe_debug(data_files, "data_files: ")
         _safe_debug(questions,  "Questions: ")
@@ -1250,4 +1248,5 @@ async def upload_files(request: Request):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
