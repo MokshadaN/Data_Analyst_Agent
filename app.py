@@ -4,6 +4,7 @@
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from sympy import im
 import uvicorn
 import pathlib
 import os
@@ -16,106 +17,12 @@ from PIL import Image
 from fastapi.middleware.cors import CORSMiddleware
 from google import genai
 from google.genai import types
-from google.genai.types import GenerateContentConfig
 from plan_Creation import *
 from plan_execution import execute_plan_v1
 import pandas as pd
 import pdfplumber
 import re
 import time
-import os
-import logging
-from datetime import datetime
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Request
-from fastapi.responses import JSONResponse
-import shutil
-from llm_calls.claude_call import claude_call_for_code
-
-
-import re, tempfile
-import pandas as pd
-import requests
-import pdfplumber
-from urllib.parse import urlparse
-import os
-import re
-import hashlib
-import pandas as pd
-import requests
-from bs4 import BeautifulSoup
-from io import StringIO
-import os
-import re
-import requests
-import pandas as pd
-from bs4 import BeautifulSoup
-import re
-import pandas as pd
-import re
-import pandas as pd
-from collections import Counter
-import re
-from collections import Counter
-import pandas as pd
-import os
-import re
-import requests
-import pandas as pd
-from bs4 import BeautifulSoup
-from io import StringIO
-import os, json, re
-from typing import Any, Dict
-# ---- Create logs folder and per-run subfolder ----
-REQUEST_TIME_LIMIT = 300  # seconds = 5 minutes
-
-
-BASE_LOG_DIR = "logs"
-os.makedirs(BASE_LOG_DIR, exist_ok=True)
-
-run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-RUN_LOG_DIR = os.path.join(BASE_LOG_DIR, run_id)
-os.makedirs(RUN_LOG_DIR, exist_ok=True)
-
-# ---- Setup logging ----
-log_file = os.path.join(RUN_LOG_DIR, "app.log")
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(log_file, encoding="utf-8"),
-        logging.StreamHandler()
-    ]
-)
-
-def save_to_log_folder(filename, content):
-    """
-    Save content under the current run's log directory.
-    - dict/list  -> JSON (UTF-8, pretty)
-    - bytes      -> raw bytes
-    - everything else -> str()
-    Returns the absolute file path.
-    """
-    file_path = os.path.join(RUN_LOG_DIR, filename)
-
-    # Ensure parent exists (paranoia)
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-
-    try:
-        if isinstance(content, (dict, list)):
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(content, f, indent=2, ensure_ascii=False)
-        elif isinstance(content, (bytes, bytearray)):
-            with open(file_path, "wb") as f:
-                f.write(content)
-        else:
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(str(content))
-        logging.info("Saved file: %s", file_path)
-        return file_path
-    except Exception as e:
-        logging.exception("Failed to save file %s: %s", file_path, e)
-        # Don't crash the whole request just because logging failed
-        return file_path
 
 from bs4 import BeautifulSoup
 app = FastAPI()
@@ -143,7 +50,13 @@ async def ui(request: Request):
 # -------------------------------------------------------------------
 # Config
 # -------------------------------------------------------------------
+from dotenv import load_dotenv
+
+# Load environment variables from .env file (override system variables)
+load_dotenv(override=True)
+
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# GEMINI_API_KEY = "AIzaSyDh7TfjKwBEI2eoE4xObDfyBbRh25YGe8k"
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 
@@ -178,9 +91,9 @@ def _is_pdf(content_type: str, filename: str) -> bool:
     return ext == ".pdf" or ct in {"application/pdf"}
 
 
-def get_image_description(image_path_or_url: str, questions , max_retries: int = 5) -> str:
+def get_image_description(image_path_or_url: str, max_retries: int = 5) -> str:
     """Returns a concise description for a local image path or URL using Gemini."""
-    _client = genai.Client(api_key="AIzaSyDh7TfjKwBEI2eoE4xObDfyBbRh25YGe8k")
+    _client = genai.Client(api_key=GEMINI_API_KEY)
 
     try:
         if image_path_or_url.startswith(("http://", "https://")):
@@ -195,12 +108,12 @@ def get_image_description(image_path_or_url: str, questions , max_retries: int =
     for attempt in range(max_retries):
         try:
             response = _client.models.generate_content(
-                model="gemini-2.5-pro",
+                model="gemini-2.5-flash",
                 contents=[
-                    "Generate description of this image required for solving the questions ",
+                    "Generate a detailed description of this image. ",
                     "If any numerical data mention that as well",
-                    image,
-                    f"And also get the information from this image needed to answer {questions} get exactly correct interpretations "
+                    "Give a detailed description and understanding from the image",
+                    image
                 ]
             )
             text = getattr(response, "text", "").strip()
@@ -279,177 +192,45 @@ def get_csv_metadata(file_path: str, sample_rows: int = 1) -> dict:
         # Keep it resilient; upstream can still process the file even if metadata fails
         return {"columns": [], "dtypes": {}, "sample_row": {}}
 
-
-
-def _summarize(obj: Any, max_list_items=3, max_keys=20, max_str_len=120, _depth=0):
-    """
-    Return a compact preview instead of the full object.
-    - Lists: {"type":"list","len":N,"sample":[...]}
-    - Dicts: only first `max_keys` keys (preserving order if possible)
-    - Strings: truncated to `max_str_len`
-    - Other scalars: returned as-is
-    """
-    if isinstance(obj, dict):
-        out = {}
-        count = 0
-        for k, v in obj.items():
-            if count >= max_keys:
-                out["…"] = f"{len(obj) - max_keys} more keys"
-                break
-            out[k] = _summarize(v, max_list_items, max_keys, max_str_len, _depth+1)
-            count += 1
-        return out
-    if isinstance(obj, list):
-        sample = [_summarize(x, max_list_items, max_keys, max_str_len, _depth+1)
-                  for x in obj[:max_list_items]]
-        return {"type": "list", "len": len(obj), "sample": sample}
-    if isinstance(obj, str):
-        return (obj[:max_str_len] + "…") if len(obj) > max_str_len else obj
-    return obj  # int/float/bool/None
-
 def get_json_metadata(file_path: str, max_preview_bytes: int = 131072) -> dict:
     """
-    Summarize JSON structure without dumping the whole file.
-    - If ijson is available, stream and build a small summary of top-level keys.
-    - Otherwise load fully (if reasonably small), but return a summarized preview.
-    - For very large files without ijson, we still avoid returning huge blobs by summarizing.
+    Read a small portion of a JSON file and summarize structure.
+    Handles top-level object or array of objects.
+    Returns keys, types, and a sample item.
     """
     try:
-        # Try streaming first (best for large files)
-        try:
-            import ijson  # optional dependency
-            with open(file_path, "rb") as f:
-                # Collect top-level keys and small samples
-                top_type = None
-                keys = []
-                dtypes = {}
-                preview = {}
-
-                # Peek the very first non-space to detect top-level type quickly
-                with open(file_path, "rb") as fpeek:
-                    start = fpeek.read(2048).lstrip()
-                if start.startswith(b"["):
-                    top_type = "array"
-                    # Stream the first few items of the top-level array
-                    items = ijson.items(open(file_path, "rb"), "item")
-                    sample_items = []
-                    for i, it in enumerate(items):
-                        if i >= 3:
-                            break
-                        sample_items.append(_summarize(it))
-                    return {
-                        "top_level_type": "array",
-                        "keys": [],         # arrays have no object keys at top-level
-                        "dtypes": {},       # not applicable
-                        "sample_object": {"type": "list", "len": None, "sample": sample_items},
-                    }
-                else:
-                    top_type = "object"
-                    # Stream top-level keys and small samples for each
-                    parser = ijson.kvitems(open(file_path, "rb"), "")
-                    for i, (k, v) in enumerate(parser):
-                        if i >= 10:  # cap number of top-level keys previewed
-                            preview["…"] = "more keys not shown"
-                            break
-                        keys.append(k)
-                        # dtype at top level
-                        dtypes[k] = type(v).__name__
-                        # summarized value
-                        preview[k] = _summarize(v)
-                    return {
-                        "top_level_type": "object",
-                        "keys": keys,
-                        "dtypes": dtypes,
-                        "sample_object": preview,
-                    }
-        except Exception:
-            # ijson missing or streaming failed; fall back to bounded/full load.
-            pass
-
-        size = os.path.getsize(file_path)
-        # If small-ish, just load and summarize
-        if size <= max_preview_bytes:
+        # Fast path: if small enough, load fully; else stream then parse
+        if os.path.getsize(file_path) <= max_preview_bytes:
             with open(file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         else:
-            # Read a chunk to try to infer shape; if it fails, load fully
+            # Stream first N bytes but ensure valid JSON by falling back to full load on failure
             with open(file_path, "r", encoding="utf-8") as f:
-                chunk = f.read(max_preview_bytes).lstrip()
-            # If clearly an array, try to parse just the first item manually
-            if chunk.startswith("["):
-                # crude first-item extractor: find first '{...}' block
-                buf = chunk
-                # ensure we have a full first object; if not, read a bit more
-                if buf.count("{") == 0 or buf.count("{") != buf.count("}"):
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        buf = f.read(max_preview_bytes * 2)
-                # extract first object between braces
-                first_obj = None
-                depth = 0; start_idx = None
-                in_str = False; esc = False
-                for i, ch in enumerate(buf):
-                    if in_str:
-                        if esc:
-                            esc = False
-                        elif ch == "\\":
-                            esc = True
-                        elif ch == '"':
-                            in_str = False
-                        continue
-                    if ch == '"':
-                        in_str = True
-                        continue
-                    if ch == "{":
-                        if depth == 0:
-                            start_idx = i
-                        depth += 1
-                    elif ch == "}":
-                        depth -= 1
-                        if depth == 0 and start_idx is not None:
-                            first_obj = buf[start_idx:i+1]
-                            break
-                if first_obj:
-                    try:
-                        data = [json.loads(first_obj)]
-                    except Exception:
-                        # As last resort: full load (we'll summarize to keep output tiny)
-                        with open(file_path, "r", encoding="utf-8") as f:
-                            data = json.load(f)
-                else:
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-            else:
-                # Probably an object; load fully (then summarize)
+                chunk = f.read(max_preview_bytes)
+            try:
+                data = json.loads(chunk)
+            except Exception:
+                # As a safe fallback (still bounded by OS limits), try full parse
                 with open(file_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
 
-        # Build compact metadata (no huge payloads)
+        # Normalize to an object sample
         if isinstance(data, list):
-            # Show only a small sample
-            sample = data[:3]
-            sample = _summarize(sample)
-            return {
-                "top_level_type": "array",
-                "keys": [],
-                "dtypes": {},
-                "sample_object": sample,
-            }
+            sample = next((x for x in data if isinstance(x, dict)), {})
         elif isinstance(data, dict):
-            # keys and dtypes at top-level only; summarize values
-            keys = list(data.keys())[:20]
-            dtypes = {k: type(data[k]).__name__ for k in keys}
-            preview = {k: _summarize(data[k]) for k in keys}
-            # add overflow marker
-            if len(data) > len(keys):
-                preview["…"] = f"{len(data) - len(keys)} more keys"
-            return {
-                "top_level_type": "object",
-                "keys": keys,
-                "dtypes": dtypes,
-                "sample_object": preview,
-            }
+            sample = data
         else:
-            return {"top_level_type": type(data).__name__, "keys": [], "dtypes": {}, "sample_object": data}
+            return {"top_level_type": type(data).__name__, "keys": [], "sample_object": {}}
+
+        keys = list(sample.keys())
+        dtypes = {k: type(sample.get(k)).__name__ for k in keys}
+
+        return {
+            "top_level_type": "array" if isinstance(data, list) else "object",
+            "keys": keys,
+            "dtypes": dtypes,
+            "sample_object": sample,
+        }
     except Exception:
         return {"top_level_type": "unknown", "keys": [], "dtypes": {}, "sample_object": {}}
 
@@ -588,6 +369,12 @@ def get_pdf_metadata(file_path: str, max_pages: int = 5, max_text_chars: int = 4
         }
 
 
+import re, tempfile
+import pandas as pd
+import requests
+import pdfplumber
+from urllib.parse import urlparse
+
 _URL_RE = re.compile(r'https?://[^\s)>\]"\']+', re.I)
 
 def _extract_urls(text: str):
@@ -708,262 +495,160 @@ def _extract_urls_comprehensive(text: str) -> List[str]:
     
     return cleaned_urls
 
-def _detect_source_type_from_ct(ct, url):
+def _detect_source_type_from_ct(ct: str, url: str):
     ct = (ct or "").lower()
-    if "html" in ct:
-        return "html"
-    if "csv" in ct or url.lower().endswith(".csv"):
-        return "csv"
-    if "json" in ct or url.lower().endswith(".json"):
-        return "json"
-    if "pdf" in ct or url.lower().endswith(".pdf"):
-        return "pdf"
+    path = urlparse(url).path.lower()
+    if "json" in ct or path.endswith(".json"): return "json"
+    if "csv" in ct or path.endswith(".csv"): return "csv"
+    if "pdf" in ct or path.endswith(".pdf"): return "pdf"
+    # heuristic: html or unknown
+    if "html" in ct or not ct: return "html"
     return "unknown"
 
-def detect_noisy_values_simple(df: pd.DataFrame, max_examples: int = 3) -> dict:
-    """
-    Return { column: [noisy_example1, noisy_example2, ...] } with only strings.
-    Flags numeric-like columns where raw cells contain extra tokens (letters, $,
-    refs, daggers, ranges, etc.) that would require cleaning.
-    """
-    if df is None or df.empty:
-        return {}
+from bs4 import BeautifulSoup
+import re
 
-    # Heuristic: columns that are likely numeric by name
-    NUM_NAME_HINT = re.compile(r"(rank|peak|year|gross|budget|revenue|total|amount|usd|worldwide)", re.I)
-    CURRENCY = re.compile(r"[$€£¥₹]")
-    BRACKET_REF = re.compile(r"\[[^\]]*\]")      # [1], [note]
-    HAS_LETTER = re.compile(r"[A-Za-z]")         # letters like in '23RK'
-    RANGE = re.compile(r"\d+\s*[–—-]\s*\d+")     # 50–100 / 50-100
-    DAGGER = re.compile(r"[†‡*]")                # footnote marks
-    BAD_CHARS = re.compile(r"[^\d.,()%\-\s]")    # anything not typical numeric tokens
-
-    # numeric-like test on a cleaned version (for column classification)
-    NUMRE = re.compile(r"^-?\(?\d{1,3}(?:,\d{3})*(?:\.\d+)?\)?%?$|^-?\(?\d+(?:\.\d+)?\)?%?$")
-    def is_numeric_like(s: str) -> bool:
-        return bool(NUMRE.fullmatch(s))
-
-    def basic_clean(s: str) -> str:
-        s = s.replace("\xa0", " ").strip()
-        s = s.replace("−", "-").replace("–", "-").replace("—", "-")
-        s = re.sub(CURRENCY, "", s)                 # drop currency symbol
-        s = BRACKET_REF.sub("", s)                  # drop [refs]
-        s = re.sub(r"[A-Za-z]", "", s)              # drop letters (important!)
-        s = re.sub(r"[^0-9.,()%\-\s]", "", s)       # keep numeric punctuation
-        s = re.sub(r"\s+", " ", s).strip()
-        return s
-
-    out = {}
-    for col in df.columns:
-        series = df[col].dropna().astype(str)
-        if series.empty:
-            continue
-
-        # decide if column is numeric-like
-        name_hint = bool(NUM_NAME_HINT.search(str(col)))
-        cleaned = series.map(basic_clean)
-        numeric_ratio = cleaned.map(is_numeric_like).mean()
-        numeric_like = name_hint or (numeric_ratio >= 0.5)
-
-        if not numeric_like:
-            continue
-
-        examples = []
-        for raw, cleaned_val in zip(series, cleaned):
-            # Flag if raw contains any of these extras:
-            has_letters = bool(HAS_LETTER.search(raw))          # catches '23RK', '24TS'
-            has_currency = bool(CURRENCY.search(raw))           # catches '$2,923,706,026'
-            has_ref = bool(BRACKET_REF.search(raw))             # catches '[# 1]'
-            has_dagger = bool(DAGGER.search(raw))               # catches '†', '*'
-            is_range = bool(RANGE.search(raw))                  # catches '50–100'
-            has_other = bool(BAD_CHARS.search(raw))             # other odd tokens
-            # Or: cleaned becomes numeric but raw != cleaned (meaning extra junk existed)
-            becomes_numeric = is_numeric_like(cleaned_val)
-
-            if (has_letters or has_currency or has_ref or has_dagger or is_range or has_other) and becomes_numeric:
-                if raw not in examples:
-                    examples.append(raw)
-            # Stop early
-            if len(examples) >= max_examples:
-                break
-
-        if examples:
-            out[str(col)] = examples
-
-    return out
-
-def _probe_url(url: str, timeout=15, save_dir="tables_output"):
-    info = {"filename": url, "url": url, "is_url": True}
-    os.makedirs(save_dir, exist_ok=True)
-
+def detect_noisy_values(table_html, headers):
+    noisy_values = {}
     try:
-        # HEAD, then fallback GET for content-type
+        soup = BeautifulSoup(table_html, "lxml")
+        rows = soup.find_all("tr")
+        data_rows = []
+        for row in rows[1:]:  # skip header row
+            cells = [cell.get_text(strip=True) for cell in row.find_all(["td", "th"])]
+            if len(cells) == len(headers):  # only keep matching length
+                data_rows.append(cells)
+
+        if not data_rows:
+            return noisy_values  # no clean rows to check
+
+        df = pd.DataFrame(data_rows, columns=headers)
+
+        for col in df.columns:
+            col_vals = df[col].dropna().astype(str)
+            # Check if majority are numeric
+            num_like_ratio = col_vals.str.match(r"^\d+(\.\d+)?$").sum() / len(col_vals)
+            if num_like_ratio > 0.5:
+                # Find values with extra non-numeric characters (noisy)
+                noise = col_vals[col_vals.str.contains(r"[^\d.,-]", regex=True)].unique().tolist()
+                if noise:
+                    noisy_values[col] = noise
+
+    except Exception as e:
+        noisy_values["_error"] = str(e)
+
+    return noisy_values
+
+
+
+def _probe_url(url: str, timeout=15):
+    info = {"filename": url, "url": url, "is_url": True}
+    try:
+        # HEAD first; some sites block HEAD → fall back to small GET
         r = requests.head(url, allow_redirects=True, timeout=timeout)
-        ct = r.headers.get("Content-Type", "").split(";")[0].strip()
+        ct = r.headers.get("Content-Type","").split(";")[0].strip()
         if not ct or r.status_code >= 400:
             r = requests.get(url, stream=True, timeout=timeout)
-            ct = r.headers.get("Content-Type", "").split(";")[0].strip()
+            ct = r.headers.get("Content-Type","").split(";")[0].strip()
         info["type"] = ct
-
         stype = _detect_source_type_from_ct(ct, url)
-        info["extension"] = {"csv": ".csv", "json": ".json", "pdf": ".pdf"}.get(stype, "")
-        info["saved_path"] = url
+        info["extension"] = {"csv":".csv","json":".json","pdf":".pdf"}.get(stype,"")
+        info["saved_path"] = url  # for URLs we keep the url here
         info["source_type"] = stype
 
-        if stype == "html":
-            html_resp = requests.get(url, timeout=timeout)
-            html_resp.raise_for_status()
-            html_text = html_resp.text
-
-            # Parse title (safe)
-            soup = BeautifulSoup(html_text, "lxml")
-            title = soup.title.string.strip() if soup.title and soup.title.string else ""
-
-            # Read all tables via StringIO to avoid FutureWarning
+        if stype == "csv":
+            # read tiny sample for schema
+            sample = pd.read_csv(url, nrows=64)
+            info["csv_metadata"] = {
+                "columns": list(map(str, sample.columns)),
+                "dtypes": {c: str(sample.dtypes[c]) for c in sample.columns},
+                "sample_row": sample.head(1).to_dict(orient="records")[0] if not sample.empty else {}
+            }
+        elif stype == "json":
+            js = requests.get(url, timeout=timeout).json()
+            if isinstance(js, list):
+                obj = next((x for x in js if isinstance(x, dict)), {})
+            elif isinstance(js, dict):
+                obj = js
+            else:
+                obj = {}
+            info["json_metadata"] = {
+                "top_level_type": "array" if isinstance(js, list) else type(js).__name__,
+                "keys": list(obj.keys()),
+                "dtypes": {k: type(obj.get(k)).__name__ for k in obj.keys()},
+                "sample_object": obj
+            }
+        elif stype == "pdf":
+            # download small temp file (pdfplumber needs a file)
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                binr = requests.get(url, timeout=timeout).content
+                tmp.write(binr)
+                tmp.flush()
+                tmp_path = tmp.name
             try:
-                dfs = pd.read_html(StringIO(html_text), flavor="lxml")
+                meta = {"page_count": None, "text_preview": "", "tables": []}
+                with pdfplumber.open(tmp_path) as pdf:
+                    meta["page_count"] = len(pdf.pages)
+                    if pdf.pages:
+                        t = (pdf.pages[0].extract_text() or "")[:100]
+                        meta["text_preview"] = t
+                info["pdf_metadata"] = meta
+            finally:
+                os.remove(tmp_path)
+        elif stype == "html":
+            from bs4 import BeautifulSoup
+            try:
+                html_resp = requests.get(url, timeout=timeout)
+                html_resp.raise_for_status()
+                soup = BeautifulSoup(html_resp.text, "html.parser")
             except Exception as e:
                 info["html_metadata"] = {
-                    "title": title,
-                    "tables_total": 0,
-                    "error": f"pd.read_html failed: {type(e).__name__}: {e}"
+                    "error": f"Failed to fetch or parse HTML: {type(e).__name__}: {e}"
                 }
                 return info
 
-            tables_info, kept = [], 0
-            for idx, df in enumerate(dfs):
-                try:
-                    # Skip tables with all-numeric column names (junk/layout)
-                    if all(isinstance(c, (int, float)) for c in df.columns):
-                        continue
+            all_tables = soup.find_all("table")
+            tables_total = len(all_tables)
+            tables_info = []
 
-                    # Save CSV
-                    file_path = os.path.join(save_dir, f"table_{idx}.csv")
-                    df.to_csv(file_path, index=False, encoding="utf-8-sig")
+            for idx, tbl in enumerate(all_tables[:2]):
+                # Extract opening tag with attributes
+                opening_tag = str(tbl).split("</table>")[0].split(">")[0] + ">"
+                caption_tag = tbl.find("caption")
+                caption = caption_tag.get_text(strip=True) if caption_tag else ""
 
-                    # Simple noisy values (list of strings per column)
-                    noisy = detect_noisy_values_simple(df)
+                # Extract headers + first 2 data rows
+                rows = tbl.find_all("tr")
+                headers = [th.get_text(strip=True) for th in rows[0].find_all(["th", "td"])] if rows else []
+                data_rows = []
+                for r in rows[1:3]:
+                    data_rows.append([c.get_text(strip=True) for c in r.find_all(["td", "th"])])
 
-                    # Print preview for debugging (safe)
-                    print(f"\n--- Table {idx} ---")
-                    print(f"Columns: {df.columns.tolist()}")
-                    print(f"First row: {('<empty>' if df.empty else df.iloc[0].tolist())}")
-                    print(f"Noisy: {noisy}")
+                # Detect noisy values
+                noisy_vals = detect_noisy_values(str(tbl), headers)
+                tables_info.append({
+                    "table_index": idx,
+                    "caption": caption,
+                    "opening_tag": str(tbl).split(">")[0] + ">",
+                    "headers": headers,
+                    "noisy_values": noisy_vals
+                })
 
-                    tables_info.append({
-                        "table_index": idx,
-                        "file_saved": file_path,
-                        "columns": [str(c) for c in df.columns],
-                        "rows_saved": int(len(df)),
-                        "noisy_values": {k: list(v) for k, v in noisy.items()}  # strings only
-                    })
-                    kept += 1
-
-                except Exception as e_table:
-                    # Keep going even if one table fails
-                    tables_info.append({
-                        "table_index": idx,
-                        "error": f"{type(e_table).__name__}: {e_table}"
-                    })
-                    continue
+            title = soup.title.string.strip() if soup.title else ""
+            headings = {f"h{i}": [h.get_text(strip=True) for h in soup.find_all(f"h{i}")] for i in range(1, 7)}
+            body_text_preview = soup.get_text(separator=" ", strip=True)[:50]
 
             info["html_metadata"] = {
                 "title": title,
-                "tables_total": kept,
+                "tables_total": tables_total,
                 "tables_info": tables_info
             }
 
         return info
-
     except Exception as e:
         info["probe_error"] = f"{type(e).__name__}: {e}"
         info["source_type"] = "unknown"
         return info
-
-from openai import OpenAI
-from dotenv import load_dotenv
-import os
-import json
-import logging
-
-# Load environment variables
-load_dotenv()
-API_KEY = os.getenv("OPENAI_API_KEY")
-if not API_KEY:
-    raise ValueError("OPENAI_API_KEY environment variable not set.")
-
-openai_client = OpenAI(api_key=API_KEY)
-
-model_to_use = "gpt-4.1-mini"  # change if you want
-# You must have _probe_url defined/imported somewhere before this function
-def get_metadata_url(u):
-    system_prompt = """
-You are a URL classifier and metadata extraction expert.
-You MUST respond with a valid JSON object with the following boolean fields:
-
-- js_rendering: true if the page requires dynamic JavaScript rendering to access content (e.g., IMDb, LinkedIn, Glassdoor, etc.).
-- pagination: true if the page requires visiting multiple pages to get complete data.
-- has_tables: true if the page has one or more structured HTML tables.
-- is_api: true if the page is an API endpoint, meaning it contains placeholders for parameters (e.g., www.example.com/{{param}}/id=2) OR returns structured data like JSON/CSV.
-- has_dynamic_params: true if the URL contains query parameters (e.g., '?key=value') that filter or sort the data, such as 'user_rating=', 'num_votes=', 'sort=', 'page=', etc.
-
-Special IMDb note:
-- Always set "js_rendering": true for IMDb URLs.
-- Always set "pagination": true for IMDb search/list URLs.
-- If the IMDb URL contains parameters like 'user_rating=', 'num_votes=', 'sort=', also set "has_dynamic_params": true.
-
-Do NOT scrape or fetch heavy content.
-Do NOT add any commentary — JSON only.
-
-Example output:
-{
-  "js_rendering": true,
-  "pagination": true,
-  "has_tables": false,
-  "is_api": false,
-  "has_dynamic_params": true
-}
-"""
-
-    input_payload = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": u}
-    ]
-
-    try:
-        response = openai_client.responses.create(
-            model=model_to_use,
-            input=input_payload,
-            temperature=0
-        )
-        llm_output = response.output_text.strip()
-        classification = json.loads(llm_output)
-
-        # Always include URL
-        classification["url"] = u
-
-        # Only keep True flags
-        filtered = {k: v for k, v in classification.items() if v is True}
-        filtered["url"] = u  # make sure URL stays
-
-        # If tables exist → add probe metadata, else skip
-        if filtered.get("has_tables"):
-            try:
-                probe_info = _probe_url(u)
-                html_meta = probe_info.get("html_metadata", {})
-                if html_meta.get("tables_total", 0) > 0:
-                    filtered["html_metadata"] = probe_info
-                else:
-                    filtered.pop("has_tables", None)
-            except Exception as e:
-                logging.error(f"[CLASSIFIER] _probe_url failed for {u}: {e}")
-                filtered.pop("has_tables", None)
-
-        return filtered  # Always returns at least {"url": ...}
-
-    except Exception as e:
-        logging.error(f"[CLASSIFIER] Failed to classify {u}: {e}")
-        return {"url": u, "error": str(e)}
 
 import unicodedata
 
@@ -1004,47 +689,6 @@ def _safe_debug(obj, prefix=""):
         s = str(obj)
     print(prefix + s)
 
-def generate_dummy_json(questions: str):
-    ans_prompt = (
-        "RETURN ONLY THE VALID JSON FORMAT SPECIFIED IN THE QUESTION"
-        "Return only valid JSON in the exact format implied by the question. "
-        "Use dummy placeholder values of the correct type (integer, float, string, chart_uri). "
-        "No explanations, no markdown, not neccesarily a correct answer , also terminate a base64 image uri do not loop till infinity"
-        "Do not enclose it in ``` json ```"
-        "FORMAT Should be same as expected in question"
-    )
-    user_ans = f"""
-Create Dummy Answers for the questions and return ONLY A VALID JSON FORMAT AS expected in the questions
-ENSURE THAT THE FORMAT IS ALWAYS CORRECT AND MATCHES THE ONE ASKED IN THE QUESTION
-{questions}
-    """
-    try:
-        print("Generating Dummy Data")
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=user_ans,
-            config=GenerateContentConfig(
-                system_instruction=ans_prompt,
-                temperature=0.35  # deterministic
-            )
-        )
-        llm_output = response.candidates[0].content.parts[0].text.strip()
-        # Extract JSON object or array
-        # print(llm_output)
-        match = re.search(r"(\{.*\}|\[.*\])", llm_output, re.S)
-        if match:
-            llm_output = match.group(0)
-        # print(llm_output)
-        try:
-            parsed = json.loads(llm_output)
-            return parsed
-        except json.JSONDecodeError:
-            logging.error("Dummy LLM output was not valid JSON")
-            return {}
-        
-    except Exception as e:
-        logging.error(f"LLM dummy generation failed: {e}")
-        return {}
 
 # -------------------------------------------------------------------
 # Routes
@@ -1057,8 +701,8 @@ def read_root():
 @app.post("/api")
 async def upload_files(request: Request):
     try:
-        request_start_time = time.time()
-        print(request_start_time)
+        start = time.time()
+        print(start)
         upload_dir = pathlib.Path("uploads")
         upload_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1095,7 +739,7 @@ async def upload_files(request: Request):
 
                 # If it's an image, generate and store description
                 if _is_image_content_type(content_type) or _is_image_filename(filename):
-                    file_info["image_description"] = get_image_description(str(file_path),questions)
+                    file_info["image_description"] = get_image_description(str(file_path))
                     print("Image description generated", file_info["image_description"])
 
                 # If it's a CSV, attach lightweight schema + sample row
@@ -1115,15 +759,12 @@ async def upload_files(request: Request):
         # 1) Extract & probe URLs in questions
         urls = _extract_urls_comprehensive(questions)
         for u in urls:
-            classification = get_metadata_url(u)
-            file_info = {
-                "filename": u,  # use the URL as filename for consistency
-                "url": u,
-                "source_type": "url",
-                "extension" : "html",
-                **classification  
-            }
-            data_files.append(file_info)
+            url_info = _probe_url(u)
+            # normalize to planner-friendly shape
+            data_files.append(url_info)
+        url_present = False
+        if len(urls)>0:
+            url_present = True
         print("[APP] 2: Received All URLS info")
         # make the values themselves safe for later usage
         data_files = _to_safe(data_files, mode="replace")
@@ -1135,18 +776,11 @@ async def upload_files(request: Request):
         if not questions:
             raise HTTPException(status_code=400, detail="questions.txt form field is required and must contain a file.")
         
-        logging.info("Step 1: Generating plan...")
         print("[APP] 3 Calling the planner Agent")
         # Build plan from questions + uploaded artifacts
         # plan = run_planner_agent_files(questions, data_files)
         plan = run_planner_agent_json_with_feedback_looping(questions,data_files)
-        save_to_log_folder("plan.json", plan)
         print("[APP] 4 GOT THE PLAN")
-        elapsed = time.time() - request_start_time
-        remaining_time = max(1, REQUEST_TIME_LIMIT - elapsed)
-
-        logging.info(f"Planning took {elapsed:.2f}s, time left for execution: {remaining_time:.2f}s")
-
         
         if isinstance(plan, (dict, list)):
             # plan.json
@@ -1156,48 +790,42 @@ async def upload_files(request: Request):
         else:
             with open("plan.txt", "w", encoding="utf-8", errors="replace") as f:
                 f.write(str(plan))
-        # return JSONResponse({"plan" : plan})
         # return JSONResponse({"Questions":questions,"data files":data_files,"plan":plan})
-        # return JSONResponse({"plan" : plan , "files" : data_files})
 
         print("[APP] 5 CALLING EXECUTE PLAN ")
-        result = execute_plan_v1(plan, questions , data_files, timeout_for_execution=remaining_time)
+        result = execute_plan_v1(plan, questions , data_files)
         print(result)
         print("[APP] 6 PLAN EXECUTED SUCCESSFULLY WITH THE RESULT")
-        total_time = time.time() - request_start_time
-        elapsed = time.time() - request_start_time
-        time_left = max(1, REQUEST_TIME_LIMIT - elapsed)
-        logging.info(f"✅ Entire pipeline completed in {total_time:.2f} seconds")
+        end = time.time()
+        print("Starting",start)
+        print("Ending",end)
+        print(end-start)
         try:
             parsed = json.loads(result)
-            results = {"status": "success"}  # Example
-            save_to_log_folder("results.json", str(results))
-
-            logging.info("=== API Call Completed ===")
             with open("results.json","w") as f:
                 json.dump(parsed, f, indent=2, ensure_ascii=False)
         except json.JSONDecodeError:
-            parsed = generate_dummy_json(questions)
-        try:
-            shutil.rmtree(upload_dir)  # deletes the entire uploads folder
-            os.makedirs(upload_dir, exist_ok=True)  # recreate empty folder for next request
-            logging.info("Uploads folder cleaned successfully.")
-        except Exception as e:
-            logging.warning(f"Could not clean uploads folder: {e}")
+            # Fallback: always return JSON, even if executor output is broken
+            parsed = {
+                "error": "Executor did not emit valid JSON.",
+                "raw_output": result
+            }
         return parsed
+
+        if not result.get("ok", False):
+            return JSONResponse(status_code=500, content=result)
+
+        return JSONResponse(content=result["result"])
+
+    
     except HTTPException:
-        parsed = generate_dummy_json(questions)
-        return parsed
-        return JSONResponse(status_code=400, content="error")
+        raise
     except Exception as e:
-        parsed = generate_dummy_json(questions)
-        return parsed
-        raise JSONResponse(status_code=400, content="error")
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 # -------------------------------------------------------------------
 # Entrypoint
 # -------------------------------------------------------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
-
+    # uvicorn.run("app:app", host="127.0.0.1", port=7680, reload=True)
+    uvicorn.run("app:app", host="127.1.1.1", port=8000, reload=True)
