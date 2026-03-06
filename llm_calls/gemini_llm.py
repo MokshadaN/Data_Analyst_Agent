@@ -18,7 +18,7 @@ def gemini_call_for_code(
     content=None,
     max_retries=5,
     retry_delay=1,
-    models_cycle=("gemini-2.5-pro", "gemini-2.5-flash"),
+    models_cycle=("gemini-3-pro-preview", "gemini-2.5-flash"),
 ) -> str:
     import re, json, time
 
@@ -52,7 +52,7 @@ def gemini_call_for_code(
                 contents=contents,
                 config=GenerateContentConfig(
                     system_instruction=system_prompt,
-                    temperature=0.35  # deterministic
+                    temperature=0  # deterministic
                 )
             )
 
@@ -74,13 +74,12 @@ def gemini_call_for_code(
 
 def test_gemini_call_for_code():
     # System prompt: minimal, code-only instruction
-    # system_prompt = "You are a Python code generator. Respond ONLY with executable Python code."
-    system_prompt = "You are a Data Analyst Agent for solving a particular question with data sourcing/scraping "
-    with open("E:/BS/Sem_May_2025/TDS_Project_2/Data_Analyst_Agent_v2/questions/question_url_1.txt","r") as f:
-        text = f.read()
+    system_prompt = "You are a Python code generator. Respond ONLY with executable Python code."
+
     # User prompt: trivial coding task
     user_prompt = (
-        {text}
+        "Write Python code that creates a pandas DataFrame with two columns A and B, "
+        "each containing numbers 1 to 5, and prints the sum of column A."
     )
 
     try:
